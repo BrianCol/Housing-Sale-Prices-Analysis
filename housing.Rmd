@@ -1,0 +1,235 @@
+---
+title: "housing"
+author: "Brian Colgrove"
+date: "4/16/2021"
+output: html_document
+---
+
+```{r}
+#packages
+library(tidyverse)
+library(GGally)
+library(nlme)
+library(car)
+library(geoR)
+library(lmtest)
+library(xtable)
+library(DataExplorer)
+source("stdres.R")
+source("predictgls.R")
+
+house <- read_csv("HousingPrices.csv")
+
+house$House.Style <- as.factor(house$House.Style)
+house$Central.Air <- as.factor(house$Central.Air)
+
+plot_missing(house)
+house.omit <- house[!is.na(house$Price), ]
+```
+
+
+```{r}
+#graphs
+ggpairs(house[,-c(2:3)])
+
+#price vs Lon
+plot(house$Lon, house$Price)
+
+#price vs Lat
+plot(house$Lat, house$Price)
+
+#price vs Gr.Liv.Area
+ggplot() + geom_point(aes(y=Price, x=Gr.Liv.Area), data=house) + xlab("Living Area Above Ground")
+
+#Pirce vs Year.Remod.Add
+ggplot() + geom_point(aes(y=Price, x=Year.Remod.Add), data=house) + xlab("Year")
+
+#price vs House.Style
+ggplot() + geom_boxplot(aes(y=Price, x=House.Style), data=house) + xlab("House Style")
+
+#price vs Garage.Cars
+ggplot() + geom_point(aes(y=Price, x=Garage.Cars), data=house) + xlab("Garage Size")
+
+#price vs Full.Bath
+plot(house$Full.Bath, house$Price)
+
+#price vs Half.Bath
+plot(house$Half.Bath, house$Price)
+
+#change baths into one
+house$Bath <- house$Full.Bath + house$Half.Bath/2
+
+#price vs Bath
+plot(house$Bath, house$Price)
+
+```
+
+
+```{r}
+#linear model
+house.lm  <- lm(Price ~ Gr.Liv.Area + Year.Remod.Add + House.Style + Central.Air +
+Full.Bath + Half.Bath + Bedroom.AbvGr + Garage.Cars , data=house)
+
+summary(house.lm)
+residuals <- house.lm$residuals
+
+#plot of residuals across the region
+ggplot(data=house[!is.na(house$Price),], mapping=aes(x=Lon, y=Lat, col=house.lm$residuals)) +
+geom_point() + scale_color_distiller(palette="Spectral") +
+xlab("Lon") + ylab("Lat") + labs(col="Resids")
+
+#heteroskedasticity
+ggplot() + geom_point(aes(x=house.lm$fitted.values, y=house.lm$residuals)) + xlab("Fitted Values") + ylab("Residuals")
+ggplot() + geom_point(aes(x=house.omit$Gr.Liv.Area, y=house.lm$residuals)) + xlab("Living Area Above Ground") + ylab("Residuals")
+ 
+#variogram
+vargram <- variog(coords=house[!is.na(house$Price),2:3], data=residuals)
+plot(vargram)
+```
+
+
+```{r}
+#exp model
+cor.exp <- gls(Price ~ Gr.Liv.Area + Year.Remod.Add + House.Style + Central.Air + Full.Bath +
+                 Half.Bath + Bedroom.AbvGr + Garage.Cars,
+               data=house, subset=!is.na(Price),
+               correlation = corExp(form=~ Lon + Lat, nugget = TRUE),
+               weights = varExp(form=~Gr.Liv.Area), method="ML")
+
+#gaus model
+cor.gaus <- gls(Price ~ Gr.Liv.Area + Year.Remod.Add + House.Style + Central.Air + Full.Bath +
+                  Half.Bath + Bedroom.AbvGr + Garage.Cars,
+                data=house, subset=!is.na(Price),
+                correlation = corGaus(form=~ Lon + Lat, nugget = TRUE),
+                weights = varExp(form=~Gr.Liv.Area), method="ML")
+
+#spher model
+cor.spher <- gls(Price ~ Gr.Liv.Area + Year.Remod.Add + House.Style + Central.Air + Full.Bath +
+                   Half.Bath + Bedroom.AbvGr + Garage.Cars,
+                 data=house, subset=!is.na(Price),
+                 correlation = corSpher(form=~ Lon + Lat, nugget = TRUE),
+                 weights = varExp(form=~Gr.Liv.Area), method="ML")
+
+#AIC values for each model
+AIC(cor.spher, cor.gaus, cor.exp)
+
+#fit gls model
+house.gls <- gls(Price ~ Gr.Liv.Area + Year.Remod.Add + House.Style + Central.Air + Full.Bath + Half.Bath + Bedroom.AbvGr + Garage.Cars,
+                 data=house.omit,
+                 correlation = corExp(form=~ Lon + Lat, nugget = TRUE),
+                 weights = varExp(form=~Gr.Liv.Area), method="ML")
+
+#gls without baths
+house.gls2 <- gls(Price ~ Gr.Liv.Area + Year.Remod.Add + House.Style + Central.Air + Bedroom.AbvGr + Garage.Cars,
+                  data=house.omit,
+                  correlation = corExp(form=~ Lon + Lat, nugget = TRUE),
+                  weights = varExp(form=~Gr.Liv.Area), method="ML")
+#summary
+summary(house.gls)
+
+#anova between two gls models
+anova(house.gls, house.gls2)
+
+#intervals
+intervals <- intervals(house.gls)
+```
+
+
+```{r}
+#time
+system.time({
+house.gls <- gls(Price ~ Gr.Liv.Area + Year.Remod.Add + House.Style + Central.Air + Full.Bath +
+                   Half.Bath + Bedroom.AbvGr + Garage.Cars,
+                 data=house.omit,
+                 correlation = corExp(form=~ Lon + Lat, nugget = TRUE),
+                 weights = varExp(form=~Gr.Liv.Area), method="ML")
+})
+
+#CV
+pb <- txtProgressBar(min = 0, max = 100, style = 3)
+n.cv <- 100
+n.test <- 200
+rpmse <- rep(x=NA, times=n.cv)
+bias <- rep(x=NA, times=n.cv)
+wid <- rep(x=NA, times=n.cv)
+cvg <- rep(x=NA, times=n.cv)
+for(cv in 1:n.cv){
+  ## Select test observations
+  test.obs <- sample(x=1:nrow(house.omit), size=n.test)
+  
+  ## Split into test and training sets
+  test.set <- house.omit[test.obs,]
+  train.set <- house.omit[-test.obs,]
+  
+  ## Fit a lm() using the training data
+  train.lm <- house.gls <- gls(Price ~ Gr.Liv.Area + Year.Remod.Add +
+                                 House.Style + Central.Air + Full.Bath +
+                                 Half.Bath + Bedroom.AbvGr + Garage.Cars,
+                               data=house.omit,
+                               correlation = corExp(form=~ Lon + Lat, nugget = TRUE),
+                               weights = varExp(form=~Gr.Liv.Area), method="ML")
+  
+  ## Generate predictions for the test set
+  my.preds <- predictgls(train.lm, newdframe=test.set)
+  
+  ## Calculate bias
+  bias[cv] <- mean(my.preds[,'SE.pred']-test.set[['Price']])
+  
+  ## Calculate RPMSE
+  rpmse[cv] <- (test.set[['Price']]-my.preds[,'SE.pred'])^2 %>% mean() %>% sqrt()
+  
+  ## Calculate Coverage
+  cvg[cv] <- ((test.set[['Price']] > my.preds[,'lwr']) & (test.set[['Price']] < my.preds[,'upr'])) %>% mean()
+  
+  ## Calculate Width
+  wid[cv] <- (my.preds[,'upr'] - my.preds[,'lwr']) %>% mean()
+  
+  ## Update the progress bar
+  setTxtProgressBar(pb, cv)
+}
+close(pb)
+
+#gls cv 
+hist(rpmse)
+hist(bias)
+hist(wid)
+hist(cvg)
+
+#lm
+sqrt(mean(house.lm$residuals^2))
+```
+
+
+
+```{r}
+#residuals of gls model
+std.resid <- stdres.gls(house.gls)
+
+#equal variance
+ggplot() + geom_point(aes(fitted(house.gls), std.resid)) + ylab('standardized residual') + xlab("Fitted Values")
+
+#independence
+ggplot(data=house[!is.na(house$Price),], mapping=aes(x=Lon, y=Lat, col=std.resid)) +
+geom_point() + scale_color_distiller(palette="Spectral") +
+xlab("Lon") + ylab("Lat") + labs(col="Resids")
+
+#normality
+ggplot() + geom_histogram(aes(std.resid)) + xlab("Resids")
+ks.test(resid(house.lm), "pnorm")
+ks.test(std.resid, "pnorm")
+
+#linearity
+avPlots(house.lm)
+
+#Pseudo-R^2
+cor(fitted(house.gls), house$Price[!is.na(house$Price)])^2
+
+#predictions of na homes
+pred <- predictgls(house.gls, newdframe = house[is.na(house$Price),-12])
+
+#plot of prediction across the region
+ggplot(aes(Lon, Lat, col = Prediction), data = pred) +
+  geom_point() + xlab("Lon") + ylab("Lat") + labs(col="Price")
+
+```
+
